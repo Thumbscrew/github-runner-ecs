@@ -1,7 +1,7 @@
 Parameters:
   AmiId:
-    Type: String
-    Description: EC2 ECS Image Id
+    Type: AWS::EC2::Image::Id
+    Description: Image Id for an ECS-optimised EC2 AMI
 
   InstanceType:
     Type: String
