@@ -1,0 +1,166 @@
+Parameters:
+  AmiId:
+    Type: String
+    Description: EC2 ECS Image Id
+
+  InstanceType:
+    Type: String
+    Description: EC2 Instance Type
+    Default: t2.micro
+
+  VpcId:
+    Type: String
+    Description: ID of VPC to deploy into
+
+  SubnetId:
+    Type: String
+    Description: ID of subnet to launch the EC2 instance in (subnet must be in supplied VPC)
+
+  ClusterName:
+    Type: String
+    Description: ECS Cluster name
+
+  LogRetentionInDays:
+    Type: Number
+    Description: Duration to keep CloudWatch logs for the container
+    Default: 30
+
+  GithubActionsRunnerName:
+    Type: String
+    Description: Friendly name for the Github Actions Runner
+  
+  GithubActionsRunnerRepoUrl:
+    Type: String
+    Description: Github repository URL the runner will be attached to
+
+  GithubActionsRunnerToken:
+    Type: String
+    Description: Github actions runner token provided in the Runner setup page
+  
+Resources:
+  ClusterInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      CreditSpecification:
+        CPUCredits: standard
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref ClusterInstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          SubnetId: !Ref SubnetId
+          GroupSet:
+            - !Ref ClusterInstanceSecurityGroup
+      UserData:
+        Fn::Base64:
+          !Sub | 
+            #!/bin/bash
+            echo ECS_CLUSTER=${ClusterName} >> /etc/ecs/ecs.config
+
+  ClusterInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow EC2 ECS node to download container images
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  ClusterInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role'
+        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+
+  ClusterInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref ClusterInstanceRole
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      
+  ClusterService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref Cluster
+      DesiredCount: 1
+      TaskDefinition: !Ref TaskDefinition
+    DependsOn: ClusterInstance
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities:
+        - EC2
+      NetworkMode: host
+      Volumes:
+        - Name: docker-socket
+          Host:
+            SourcePath: /var/run/docker.sock
+      ContainerDefinitions:
+        - Name: github-actions-runner
+          Image: tcardonne/github-runner:latest
+          MemoryReservation: 512
+          Environment:
+            - Name: RUNNER_NAME
+              Value: !Ref GithubActionsRunnerName
+            - Name: RUNNER_REPOSITORY_URL
+              Value: !Ref GithubActionsRunnerRepoUrl
+            - Name: RUNNER_TOKEN
+              Value: !Ref GithubActionsRunnerToken
+          MountPoints:
+            - ContainerPath: /var/run/docker.sock
+              SourceVolume: docker-socket
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              'awslogs-group': !Ref LogGroup
+              'awslogs-region': !Ref AWS::Region
+              'awslogs-stream-prefix': ecs
+          Essential: true
+  
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: LogGroupAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/ecs/${ClusterName}
+      RetentionInDays: !Ref LogRetentionInDays
